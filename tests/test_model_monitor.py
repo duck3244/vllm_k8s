@@ -222,11 +222,17 @@ class TestModelHealthChecker:
                 gpu_temperature=70.0,
                 load_average=(1.2, 1.5, 1.8)
             )
-            
+
             with patch.object(health_checker, 'get_gpu_metrics') as mock_gpu:
                 mock_gpu.return_value = {
                     "gpu_memory_percent": 75.0,
                     "gpu_temperature": 70.0
                 }
-                
-                metrics =
+
+                metrics = await health_checker.perform_health_check(mock_vllm_service)
+
+                assert metrics.status == ModelStatus.HEALTHY
+                assert metrics.response_time_avg == 1.5
+                assert metrics.error_rate == 0.1  # 1/10
+                assert metrics.memory_usage_percent == 65.0
+                assert len(health_checker.health_history) == 1

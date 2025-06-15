@@ -503,9 +503,3 @@ python tests/run_tests.py --check-deps
 ## 📄 라이선스
 
 이 프로젝트는 MIT 라이선스 하에 배포됩니다. 자세한 내용은 [LICENSE](LICENSE) 파일을 참조하세요.
-
----
-
-⭐ **이 프로젝트가 도움이 되었다면 Star를 눌러주세요!**
-
-**Made with ❤️ by the vLLM API Server Team**

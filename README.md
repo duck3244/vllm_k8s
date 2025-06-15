@@ -504,20 +504,6 @@ python tests/run_tests.py --check-deps
 
 이 프로젝트는 MIT 라이선스 하에 배포됩니다. 자세한 내용은 [LICENSE](LICENSE) 파일을 참조하세요.
 
-## 🙏 감사의 말
-
-- [vLLM 팀](https://github.com/vllm-project/vllm) - 고성능 LLM 추론 엔진
-- [FastAPI](https://fastapi.tiangolo.com/) - 현대적인 웹 프레임워크
-- [Hugging Face](https://huggingface.co/) - 트랜스포머 모델 생태계
-- [OpenAI](https://openai.com/) - API 표준 참조
-
-## 📞 지원 및 연락
-
-- **이슈 트래커**: [GitHub Issues](https://github.com/your-org/vllm-api-server/issues)
-- **토론**: [GitHub Discussions](https://github.com/your-org/vllm-api-server/discussions)
-- **이메일**: support@your-org.com
-- **슬랙**: [커뮤니티 슬랙](https://your-org.slack.com)
-
 ---
 
 ⭐ **이 프로젝트가 도움이 되었다면 Star를 눌러주세요!**

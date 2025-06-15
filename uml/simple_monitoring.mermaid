@@ -1,0 +1,15 @@
+graph LR
+    A[Request] --> B[API]
+    B --> C[Metrics Collection]
+    
+    D[Health Checker] --> E[GPU Metrics]
+    D --> F[System Metrics]
+    D --> G[Model Status]
+    
+    E --> H[Alerts]
+    F --> H
+    G --> H
+    
+    C --> I[Prometheus]
+    H --> I
+    I --> J[Grafana]

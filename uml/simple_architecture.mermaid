@@ -1,0 +1,16 @@
+graph TD
+    A[Client] --> B[FastAPI]
+    B --> C[VLLMService]
+    B --> D[RayService]
+    B --> E[ModelMonitor]
+    
+    C --> F[RayActor]
+    F --> G[GPU]
+    
+    D --> H[RayCluster]
+    
+    E --> I[HealthCheck]
+    E --> J[Metrics]
+    
+    B --> K[Config]
+    B --> L[Logging]

@@ -1,0 +1,19 @@
+graph TB
+    A[Users] --> B[LoadBalancer]
+    B --> C[API Pod 1]
+    B --> D[API Pod 2]
+    
+    C --> E[Ray Head]
+    D --> E
+    
+    E --> F[Ray Worker 1]
+    E --> G[Ray Worker 2]
+    
+    F --> H[GPU 1]
+    G --> I[GPU 2]
+    
+    C --> J[Config]
+    D --> J
+    
+    F --> K[Models]
+    G --> K

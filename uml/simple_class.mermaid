@@ -1,0 +1,30 @@
+classDiagram
+    class FastAPIApp {
+        +start()
+        +shutdown()
+    }
+    
+    class APIRouter {
+        +generate_text()
+        +health_check()
+    }
+    
+    class VLLMService {
+        +initialize()
+        +generate()
+    }
+    
+    class RayService {
+        +connect()
+        +get_resources()
+    }
+    
+    class ModelMonitor {
+        +check_health()
+        +collect_metrics()
+    }
+    
+    FastAPIApp --> APIRouter
+    APIRouter --> VLLMService
+    APIRouter --> RayService
+    APIRouter --> ModelMonitor

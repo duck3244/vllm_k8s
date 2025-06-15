@@ -1,0 +1,369 @@
+# k8s/vllm-deployment.yaml
+# vLLM API Server 배포 설정
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-api-server
+  namespace: default
+  labels:
+    app: vllm-api-server
+    component: api-server
+    version: v1.0.0
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: vllm-api-server
+  template:
+    metadata:
+      labels:
+        app: vllm-api-server
+        component: api-server
+        version: v1.0.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: vllm-api-service-account
+      
+      # 보안 컨텍스트
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+      
+      containers:
+      - name: vllm-api
+        image: vllm-api:latest  # 실제 이미지 레지스트리 경로로 변경
+        imagePullPolicy: Always
+        
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        
+        env:
+        # ConfigMap에서 환경변수 로드
+        - name: MODEL_PATH
+          valueFrom:
+            configMapKeyRef:
+              name: vllm-config
+              key: MODEL_PATH
+        - name: RAY_ADDRESS
+          valueFrom:
+            configMapKeyRef:
+              name: vllm-config
+              key: RAY_ADDRESS
+        - name: RAY_REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vllm-secrets
+              key: RAY_REDIS_PASSWORD
+        - name: API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: vllm-secrets
+              key: API_KEY
+              optional: true
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: vllm-config
+              key: LOG_LEVEL
+        - name: GPU_MEMORY_UTILIZATION
+          valueFrom:
+            configMapKeyRef:
+              name: vllm-config
+              key: GPU_MEMORY_UTILIZATION
+        - name: MAX_MODEL_LEN
+          valueFrom:
+            configMapKeyRef:
+              name: vllm-config
+              key: MAX_MODEL_LEN
+        - name: TENSOR_PARALLEL_SIZE
+          valueFrom:
+            configMapKeyRef:
+              name: vllm-config
+              key: TENSOR_PARALLEL_SIZE
+        
+        # 리소스 제한
+        resources:
+          requests:
+            cpu: 1000m
+            memory: 4Gi
+          limits:
+            cpu: 2000m
+            memory: 8Gi
+        
+        # 볼륨 마운트
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+          readOnly: true
+        - name: logs
+          mountPath: /app/logs
+        - name: tmp
+          mountPath: /tmp
+        
+        # 헬스체크
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+          successThreshold: 1
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+        
+        # 시작 프로브 (초기화 시간이 긴 경우)
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 12  # 2분 대기
+          successThreshold: 1
+        
+        # 환경변수 추가
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        
+        # 시그널 처리를 위한 설정
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - "sleep 15"
+      
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-storage-pvc
+      - name: logs
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+      
+      # 파드 배치 설정
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - vllm-api-server
+              topologyKey: kubernetes.io/hostname
+      
+      # 종료 시간 설정
+      terminationGracePeriodSeconds: 30
+      
+      # DNS 설정
+      dnsPolicy: ClusterFirst
+      
+      # 재시작 정책
+      restartPolicy: Always
+
+---
+# vLLM API Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-api-service
+  namespace: default
+  labels:
+    app: vllm-api-server
+    component: api-service
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8000"
+    prometheus.io/path: "/metrics"
+spec:
+  selector:
+    app: vllm-api-server
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+  - name: metrics
+    port: 8000
+    targetPort: http
+    protocol: TCP
+  type: ClusterIP
+  sessionAffinity: None
+
+---
+# External LoadBalancer Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-api-external
+  namespace: default
+  labels:
+    app: vllm-api-server
+    component: external-service
+spec:
+  selector:
+    app: vllm-api-server
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+    protocol: TCP
+  type: LoadBalancer
+  loadBalancerSourceRanges:
+  - 0.0.0.0/0  # 실제 환경에서는 특정 IP 대역으로 제한
+
+---
+# ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vllm-api-service-account
+  namespace: default
+  labels:
+    app: vllm-api-server
+
+---
+# Role for vLLM API
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vllm-api-role
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch"]
+
+---
+# RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vllm-api-role-binding
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vllm-api-role
+subjects:
+- kind: ServiceAccount
+  name: vllm-api-service-account
+  namespace: default
+
+---
+# HorizontalPodAutoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vllm-api-hpa
+  namespace: default
+  labels:
+    app: vllm-api-server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vllm-api-server
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 60
+
+---
+# PodDisruptionBudget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm-api-pdb
+  namespace: default
+  labels:
+    app: vllm-api-server
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: vllm-api-server
+
+---
+# NetworkPolicy (선택사항)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vllm-api-network-policy
+  namespace: default
+  labels:
+    app: vllm-api-server
+spec:
+  podSelector:
+    matchLabels:
+      app: vllm-api-server
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 8000
+  egress:
+  - {}  # 모든 아웃바운드 트래픽 허용

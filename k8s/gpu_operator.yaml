@@ -1,0 +1,208 @@
+# k8s/gpu-operator.yaml
+# NVIDIA GPU Operator 설치 및 설정
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpu-operator
+  labels:
+    name: gpu-operator
+
+---
+# Helm Chart CRD (사용하지 않는 경우 주석 처리)
+# 실제 배포시에는 Helm을 사용하는 것을 권장합니다
+# helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+# helm install gpu-operator nvidia/gpu-operator -n gpu-operator --create-namespace
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-operator-config
+  namespace: gpu-operator
+data:
+  # GPU Operator 설정
+  operator.defaultRuntime: "containerd"
+  operator.runtimeClass: "nvidia"
+  driver.enabled: "true"
+  toolkit.enabled: "true"
+  devicePlugin.enabled: "true"
+  dcgmExporter.enabled: "true"
+  nodeStatusExporter.enabled: "true"
+  
+---
+# GPU Feature Discovery를 위한 NodeFeatureDiscovery 설치
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: node-feature-discovery
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nfd-worker
+  namespace: node-feature-discovery
+  labels:
+    app: nfd-worker
+spec:
+  selector:
+    matchLabels:
+      app: nfd-worker
+  template:
+    metadata:
+      labels:
+        app: nfd-worker
+    spec:
+      dnsPolicy: ClusterFirstWithHostNet
+      containers:
+      - name: nfd-worker
+        image: k8s.gcr.io/nfd/node-feature-discovery:v0.14.2
+        command:
+        - "nfd-worker"
+        args:
+        - "--sleep-interval=60s"
+        - "--server=nfd-master.node-feature-discovery.svc.cluster.local:8080"
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        volumeMounts:
+        - name: host-boot
+          mountPath: "/host-boot"
+          readOnly: true
+        - name: host-os-release
+          mountPath: "/host-etc/os-release"
+          readOnly: true
+        - name: host-sys
+          mountPath: "/host-sys"
+          readOnly: true
+        - name: host-usr-share
+          mountPath: "/host-usr/share"
+          readOnly: true
+        - name: host-lib
+          mountPath: "/host-lib"
+          readOnly: true
+        - name: source-d
+          mountPath: "/etc/kubernetes/node-feature-discovery/source.d/"
+          readOnly: true
+        - name: features-d
+          mountPath: "/etc/kubernetes/node-feature-discovery/features.d/"
+          readOnly: true
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+      hostNetwork: true
+      volumes:
+      - name: host-boot
+        hostPath:
+          path: "/boot"
+      - name: host-os-release
+        hostPath:
+          path: "/etc/os-release"
+      - name: host-sys
+        hostPath:
+          path: "/sys"
+      - name: host-usr-share
+        hostPath:
+          path: "/usr/share"
+      - name: host-lib
+        hostPath:
+          path: "/lib"
+      - name: source-d
+        hostPath:
+          path: "/etc/kubernetes/node-feature-discovery/source.d/"
+          type: DirectoryOrCreate
+      - name: features-d
+        hostPath:
+          path: "/etc/kubernetes/node-feature-discovery/features.d/"
+          type: DirectoryOrCreate
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nfd-master
+  namespace: node-feature-discovery
+  labels:
+    app: nfd-master
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nfd-master
+  template:
+    metadata:
+      labels:
+        app: nfd-master
+    spec:
+      containers:
+      - name: nfd-master
+        image: k8s.gcr.io/nfd/node-feature-discovery:v0.14.2
+        command:
+        - "nfd-master"
+        ports:
+        - containerPort: 8080
+          name: grpc
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nfd-master
+  namespace: node-feature-discovery
+  labels:
+    app: nfd-master
+spec:
+  selector:
+    app: nfd-master
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: grpc
+  type: ClusterIP
+
+---
+# GPU 리소스 확인을 위한 테스트 파드 (배포 후 삭제)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-test-pod
+  namespace: default
+  labels:
+    app: gpu-test
+spec:
+  restartPolicy: Never
+  containers:
+  - name: gpu-test
+    image: nvidia/cuda:12.1-base-ubuntu22.04
+    command: ["nvidia-smi"]
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+      requests:
+        nvidia.com/gpu: 1
+  tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+---
+# RuntimeClass for NVIDIA containers
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: nvidia
+handler: nvidia

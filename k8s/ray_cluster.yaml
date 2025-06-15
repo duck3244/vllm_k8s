@@ -1,0 +1,368 @@
+# k8s/ray-cluster.yaml
+# Ray Cluster 정의 및 설정
+
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: vllm-ray-cluster
+  namespace: default
+  labels:
+    app: vllm-ray-cluster
+spec:
+  # Ray 클러스터 설정
+  rayVersion: '2.9.0'
+  enableInTreeAutoscaling: false
+  autoscalerOptions:
+    upscalingMode: Default
+    idleTimeoutSeconds: 60
+    imagePullPolicy: Always
+    resources:
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+  
+  # Ray Head 노드 설정
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: '0.0.0.0'
+      dashboard-port: '8265'
+      port: '6379'
+      object-manager-port: '8076'
+      node-manager-port: '8077'
+      redis-password: 'LetMeInRay'
+      num-cpus: '0'  # Head 노드는 스케줄링에 사용하지 않음
+    
+    template:
+      metadata:
+        labels:
+          app: ray-head
+          ray.io/cluster: vllm-ray-cluster
+          ray.io/node-type: head
+      spec:
+        containers:
+        - name: ray-head
+          image: rayproject/ray:2.9.0-py39-gpu
+          imagePullPolicy: Always
+          ports:
+          - containerPort: 6379
+            name: gcs-server
+            protocol: TCP
+          - containerPort: 8265
+            name: dashboard
+            protocol: TCP
+          - containerPort: 10001
+            name: client
+            protocol: TCP
+          - containerPort: 8076
+            name: object-manager
+            protocol: TCP
+          - containerPort: 8077
+            name: node-manager
+            protocol: TCP
+          
+          env:
+          - name: RAY_DISABLE_IMPORT_WARNING
+            value: "1"
+          - name: RAY_DEDUP_LOGS
+            value: "0"
+          - name: RAY_ADDRESS
+            value: "0.0.0.0:10001"
+          
+          resources:
+            limits:
+              cpu: 2
+              memory: 8Gi
+            requests:
+              cpu: 1
+              memory: 4Gi
+          
+          volumeMounts:
+          - mountPath: /tmp/ray
+            name: ray-logs
+          - mountPath: /models
+            name: model-storage
+          - mountPath: /dev/shm
+            name: shared-mem
+          
+          # 헬스체크
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8265
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8265
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
+        
+        volumes:
+        - name: ray-logs
+          emptyDir: {}
+        - name: shared-mem
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+        - name: model-storage
+          hostPath:
+            path: /data/models  # 실제 모델 저장 경로로 변경 필요
+            type: DirectoryOrCreate
+        
+        # 서비스 어카운트
+        serviceAccountName: ray-head-service-account
+        
+        # 보안 컨텍스트
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          fsGroup: 1000
+  
+  # Ray Worker 노드 설정
+  workerGroupSpecs:
+  - replicas: 2
+    minReplicas: 1
+    maxReplicas: 4
+    groupName: gpu-worker-group
+    
+    rayStartParams:
+      redis-password: 'LetMeInRay'
+      num-cpus: '4'
+      num-gpus: '1'
+      object-store-memory: '2000000000'  # 2GB
+    
+    template:
+      metadata:
+        labels:
+          app: ray-worker
+          ray.io/cluster: vllm-ray-cluster
+          ray.io/node-type: worker
+          ray.io/group: gpu-worker-group
+      spec:
+        containers:
+        - name: ray-worker
+          image: rayproject/ray:2.9.0-py39-gpu
+          imagePullPolicy: Always
+          
+          env:
+          - name: RAY_DISABLE_IMPORT_WARNING
+            value: "1"
+          - name: RAY_DEDUP_LOGS
+            value: "0"
+          - name: CUDA_VISIBLE_DEVICES
+            value: "0"
+          - name: NVIDIA_VISIBLE_DEVICES
+            value: "all"
+          
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "ray stop"]
+          
+          resources:
+            limits:
+              cpu: 8
+              memory: 32Gi
+              nvidia.com/gpu: 1
+            requests:
+              cpu: 4
+              memory: 16Gi
+              nvidia.com/gpu: 1
+          
+          volumeMounts:
+          - mountPath: /tmp/ray
+            name: ray-logs
+          - mountPath: /models
+            name: model-storage
+          - mountPath: /dev/shm
+            name: shared-mem
+          
+          # 헬스체크
+          livenessProbe:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - "ray status"
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+        
+        volumes:
+        - name: ray-logs
+          emptyDir: {}
+        - name: shared-mem
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+        - name: model-storage
+          hostPath:
+            path: /data/models  # 실제 모델 저장 경로로 변경 필요
+            type: DirectoryOrCreate
+        
+        # GPU 노드에만 스케줄링
+        nodeSelector:
+          accelerator: nvidia-gpu
+        
+        # GPU 관련 Toleration
+        tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: ray.io/node-type
+          operator: Equal
+          value: worker
+          effect: NoSchedule
+        
+        # 서비스 어카운트
+        serviceAccountName: ray-worker-service-account
+        
+        # 보안 컨텍스트
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          fsGroup: 1000
+        
+        # 런타임 클래스 (GPU 지원)
+        runtimeClassName: nvidia
+
+---
+# Ray Head Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: ray-head-svc
+  namespace: default
+  labels:
+    app: ray-head
+    ray.io/cluster: vllm-ray-cluster
+spec:
+  selector:
+    ray.io/cluster: vllm-ray-cluster
+    ray.io/node-type: head
+  ports:
+  - name: gcs-server
+    port: 6379
+    targetPort: 6379
+    protocol: TCP
+  - name: dashboard
+    port: 8265
+    targetPort: 8265
+    protocol: TCP
+  - name: client
+    port: 10001
+    targetPort: 10001
+    protocol: TCP
+  - name: object-manager
+    port: 8076
+    targetPort: 8076
+    protocol: TCP
+  - name: node-manager
+    port: 8077
+    targetPort: 8077
+    protocol: TCP
+  type: ClusterIP
+
+---
+# Ray Dashboard External Service (LoadBalancer)
+apiVersion: v1
+kind: Service
+metadata:
+  name: ray-dashboard
+  namespace: default
+  labels:
+    app: ray-dashboard
+spec:
+  selector:
+    ray.io/cluster: vllm-ray-cluster
+    ray.io/node-type: head
+  ports:
+  - name: dashboard
+    port: 8265
+    targetPort: 8265
+    protocol: TCP
+  type: LoadBalancer
+
+---
+# ServiceAccount for Ray Head
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ray-head-service-account
+  namespace: default
+
+---
+# ServiceAccount for Ray Workers
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ray-worker-service-account
+  namespace: default
+
+---
+# ClusterRole for Ray
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ray-cluster-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get", "list"]
+
+---
+# ClusterRoleBinding for Ray Head
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ray-head-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ray-cluster-role
+subjects:
+- kind: ServiceAccount
+  name: ray-head-service-account
+  namespace: default
+
+---
+# ClusterRoleBinding for Ray Workers
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ray-worker-cluster-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ray-cluster-role
+subjects:
+- kind: ServiceAccount
+  name: ray-worker-service-account
+  namespace: default
+
+---
+# PodDisruptionBudget for Ray Workers
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ray-worker-pdb
+  namespace: default
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      ray.io/cluster: vllm-ray-cluster
+      ray.io/node-type: worker

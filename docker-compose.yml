@@ -1,0 +1,588 @@
+# vLLM API Server Docker Compose 설정
+# 개발 환경을 위한 기본 구성
+
+version: '3.8'
+
+#============================================================================
+# 네트워크 설정
+#============================================================================
+networks:
+  vllm-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+#============================================================================
+# 볼륨 설정
+#============================================================================
+volumes:
+  # 데이터베이스 데이터
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  
+  # 모델 캐시
+  model_cache:
+    driver: local
+  huggingface_cache:
+    driver: local
+  
+  # 로그 데이터
+  app_logs:
+    driver: local
+  
+  # Prometheus 데이터
+  prometheus_data:
+    driver: local
+  
+  # Grafana 데이터
+  grafana_data:
+    driver: local
+
+#============================================================================
+# 서비스 정의
+#============================================================================
+services:
+  #--------------------------------------------------------------------------
+  # vLLM API 서버 (개발 환경)
+  #--------------------------------------------------------------------------
+  vllm-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: vllm-api-dev
+    restart: unless-stopped
+    ports:
+      - "8000:8000"    # API 서버
+      - "8001:8001"    # 개발 도구
+    environment:
+      # 기본 설정
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+      
+      # 데이터베이스 연결
+      - DATABASE_URL=postgresql://vllm_user:vllm_password@postgres:5432/vllm_api
+      - REDIS_URL=redis://redis:6379/0
+      
+      # 모델 설정
+      - MODEL_NAME=microsoft/DialoGPT-medium
+      - MODEL_PATH=/app/models
+      - MAX_MODEL_LEN=2048
+      - GPU_MEMORY_UTILIZATION=0.8
+      
+      # 보안 설정
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - API_KEY=dev-api-key
+      
+      # 캐시 설정
+      - CACHE_TTL_DEFAULT=300
+      
+      # 모니터링
+      - METRICS_ENABLED=true
+      - HEALTH_CHECK_ENABLED=true
+    volumes:
+      # 소스 코드 (개발용 핫 리로드)
+      - ./app:/app/app:ro
+      - ./config:/app/config:ro
+      - ./tests:/app/tests:ro
+      
+      # 데이터 볼륨
+      - model_cache:/app/models
+      - huggingface_cache:/cache/huggingface
+      - app_logs:/app/logs
+      
+      # 설정 파일
+      - ./.env:/app/.env:ro
+    networks:
+      - vllm-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  #--------------------------------------------------------------------------
+  # Redis Commander (Redis GUI)
+  #--------------------------------------------------------------------------
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: vllm-redis-commander
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+      - HTTP_USER=admin
+      - HTTP_PASSWORD=admin
+    networks:
+      - vllm-network
+    depends_on:
+      - redis
+    profiles:
+      - tools
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+
+  #--------------------------------------------------------------------------
+  # pgAdmin (PostgreSQL GUI)
+  #--------------------------------------------------------------------------
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: vllm-pgadmin
+    restart: unless-stopped
+    ports:
+      - "8082:80"
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@vllm-api.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+      - PGADMIN_CONFIG_SERVER_MODE=False
+    volumes:
+      - ./config/pgadmin/servers.json:/pgadmin4/servers.json:ro
+    networks:
+      - vllm-network
+    depends_on:
+      - postgres
+    profiles:
+      - tools
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  #--------------------------------------------------------------------------
+  # Jaeger 분산 추적 (선택적)
+  #--------------------------------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: vllm-jaeger
+    restart: unless-stopped
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "14268:14268"  # Jaeger Collector
+    environment:
+      - COLLECTOR_ZIPKIN_HOST_PORT=:9411
+    networks:
+      - vllm-network
+    profiles:
+      - monitoring
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  #--------------------------------------------------------------------------
+  # Elasticsearch (로그 저장소 - 선택적)
+  #--------------------------------------------------------------------------
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: vllm-elasticsearch
+    restart: unless-stopped
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - vllm-network
+    profiles:
+      - logging
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+
+  #--------------------------------------------------------------------------
+  # Kibana (로그 시각화 - 선택적)
+  #--------------------------------------------------------------------------
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: vllm-kibana
+    restart: unless-stopped
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    networks:
+      - vllm-network
+    depends_on:
+      - elasticsearch
+    profiles:
+      - logging
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  #--------------------------------------------------------------------------
+  # Celery Worker (백그라운드 작업 - 선택적)
+  #--------------------------------------------------------------------------
+  celery-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: vllm-celery-worker
+    restart: unless-stopped
+    command: celery -A app.tasks worker --loglevel=info --concurrency=2
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://vllm_user:vllm_password@postgres:5432/vllm_api
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    volumes:
+      - ./app:/app/app:ro
+      - ./config:/app/config:ro
+      - model_cache:/app/models
+      - app_logs:/app/logs
+    networks:
+      - vllm-network
+    depends_on:
+      - postgres
+      - redis
+    profiles:
+      - workers
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
+
+  #--------------------------------------------------------------------------
+  # Celery Beat (스케줄러 - 선택적)
+  #--------------------------------------------------------------------------
+  celery-beat:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: vllm-celery-beat
+    restart: unless-stopped
+    command: celery -A app.tasks beat --loglevel=info
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql://vllm_user:vllm_password@postgres:5432/vllm_api
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+    volumes:
+      - ./app:/app/app:ro
+      - ./config:/app/config:ro
+      - app_logs:/app/logs
+    networks:
+      - vllm-network
+    depends_on:
+      - postgres
+      - redis
+    profiles:
+      - workers
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  #--------------------------------------------------------------------------
+  # Flower (Celery 모니터링 - 선택적)
+  #--------------------------------------------------------------------------
+  flower:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: production
+    container_name: vllm-flower
+    restart: unless-stopped
+    ports:
+      - "5555:5555"
+    command: celery -A app.tasks flower --port=5555
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - FLOWER_BASIC_AUTH=admin:admin
+    networks:
+      - vllm-network
+    depends_on:
+      - redis
+    profiles:
+      - workers
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+
+#============================================================================
+# 추가 볼륨 (프로파일별)
+#============================================================================
+volumes:
+  elasticsearch_data:
+    driver: local
+
+#============================================================================
+# 개발용 오버라이드 설정
+#============================================================================
+# docker-compose.override.yml 파일에서 개발자별 설정 가능
+
+---
+# 파일 끝에 추가 구성 예시들
+
+#============================================================================
+# 사용 예시
+#============================================================================
+
+# 기본 개발 환경 실행:
+# docker-compose up -d
+
+# 전체 모니터링 스택 포함:
+# docker-compose --profile monitoring up -d
+
+# 로깅 스택 포함:
+# docker-compose --profile logging up -d
+
+# 개발 도구 포함:
+# docker-compose --profile tools up -d
+
+# 백그라운드 작업 포함:
+# docker-compose --profile workers up -d
+
+# 모든 서비스 포함:
+# docker-compose --profile monitoring --profile logging --profile tools --profile workers up -d
+
+#============================================================================
+# 환경별 설정 파일
+#============================================================================
+
+# 운영 환경: docker-compose.prod.yml
+# 테스트 환경: docker-compose.test.yml
+# GPU 환경: docker-compose.gpu.yml
+# 클러스터 환경: docker-compose.cluster.yml
+
+#============================================================================
+# 유용한 명령어들
+#============================================================================
+
+# 로그 확인:
+# docker-compose logs -f vllm-api
+
+# 컨테이너 상태 확인:
+# docker-compose ps
+
+# 리소스 사용량 확인:
+# docker-compose top
+
+# 데이터베이스 백업:
+# docker-compose exec postgres pg_dump -U vllm_user vllm_api > backup.sql
+
+# Redis 메모리 사용량 확인:
+# docker-compose exec redis redis-cli info memory
+
+# 모델 캐시 정리:
+# docker-compose exec vllm-api rm -rf /app/models/*
+
+# 컨테이너 재시작:
+# docker-compose restart vllm-api
+
+# 볼륨 정리:
+# docker-compose down -v
+
+# 이미지 재빌드:
+# docker-compose build --no-cache vllm-api
+
+#============================================================================
+# 보안 고려사항
+#============================================================================
+
+# 1. 운영 환경에서는 기본 비밀번호 변경 필수
+# 2. SSL/TLS 인증서 설정
+# 3. 네트워크 보안 그룹 설정
+# 4. 민감한 환경 변수는 Docker Secrets 사용
+# 5. 정기적인 이미지 업데이트
+# 6. 로그 로테이션 설정
+# 7. 백업 및 복구 계획 수립
+
+#============================================================================
+# 성능 최적화
+#============================================================================
+
+# 1. 메모리 제한 설정
+# 2. CPU 제한 및 예약
+# 3. 디스크 I/O 최적화
+# 4. 네트워크 대역폭 제한
+# 5. 로그 레벨 조정
+# 6. 캐시 크기 최적화
+# 7. 데이터베이스 튜닝:
+          memory: 8G
+        reservations:
+          memory: 4G
+
+  #--------------------------------------------------------------------------
+  # PostgreSQL 데이터베이스
+  #--------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: vllm-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=vllm_api
+      - POSTGRES_USER=vllm_user
+      - POSTGRES_PASSWORD=vllm_password
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    networks:
+      - vllm-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vllm_user -d vllm_api"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 512M
+
+  #--------------------------------------------------------------------------
+  # Redis 캐시
+  #--------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: vllm-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+      - ./config/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - vllm-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  #--------------------------------------------------------------------------
+  # Prometheus 모니터링
+  #--------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: vllm-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - vllm-network
+    depends_on:
+      - vllm-api
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  #--------------------------------------------------------------------------
+  # Grafana 대시보드
+  #--------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: vllm-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./config/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - vllm-network
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  #--------------------------------------------------------------------------
+  # Nginx 리버스 프록시
+  #--------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: vllm-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./config/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    networks:
+      - vllm-network
+    depends_on:
+      - vllm-api
+    deploy:
+      resources:
+        limits

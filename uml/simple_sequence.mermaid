@@ -1,0 +1,9 @@
+sequenceDiagram
+    Client->>API: POST /generate
+    API->>VLLMService: generate()
+    VLLMService->>RayActor: remote_call()
+    RayActor->>GPU: inference()
+    GPU-->>RayActor: result
+    RayActor-->>VLLMService: response
+    VLLMService-->>API: data
+    API-->>Client: JSON

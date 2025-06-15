@@ -1,0 +1,386 @@
+# k8s/configmap.yaml
+# 설정 데이터 및 환경변수
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-config
+  namespace: default
+  labels:
+    app: vllm-api-server
+    component: config
+data:
+  # 애플리케이션 설정
+  APP_NAME: "vLLM Llama 3.2 API Server"
+  APP_VERSION: "1.0.0"
+  DEBUG: "false"
+  
+  # 모델 설정
+  MODEL_PATH: "/models/llama-3.2-3b-instruct"
+  MODEL_NAME: "llama-3.2-3b-instruct"
+  MODEL_TYPE: "llama"
+  
+  # vLLM 엔진 설정
+  TENSOR_PARALLEL_SIZE: "1"
+  GPU_MEMORY_UTILIZATION: "0.9"
+  MAX_MODEL_LEN: "4096"
+  MAX_NUM_SEQS: "256"
+  DTYPE: "half"
+  TRUST_REMOTE_CODE: "true"
+  QUANTIZATION: ""  # awq, gptq, squeezellm, fp8 등
+  
+  # Ray 클러스터 설정
+  RAY_ADDRESS: "ray://ray-head-svc:10001"
+  RAY_NAMESPACE: "vllm"
+  RAY_DISABLE_IMPORT_WARNING: "1"
+  RAY_DEDUP_LOGS: "0"
+  
+  # API 서버 설정
+  API_HOST: "0.0.0.0"
+  API_PORT: "8000"
+  API_WORKERS: "1"
+  API_PREFIX: "/api/v1"
+  CORS_ORIGINS: '["*"]'
+  
+  # 인증 설정
+  API_KEY_ENABLED: "false"
+  
+  # 로깅 설정
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # 성능 및 제한 설정
+  MAX_CONCURRENT_REQUESTS: "100"
+  REQUEST_TIMEOUT: "300"
+  MAX_TOKENS_PER_REQUEST: "2048"
+  
+  # 모니터링 설정
+  METRICS_ENABLED: "true"
+  HEALTH_CHECK_PATH: "/health"
+  METRICS_PATH: "/metrics"
+  
+  # 보안 설정
+  ALLOWED_HOSTS: '["*"]'
+  
+  # CUDA 설정
+  CUDA_VISIBLE_DEVICES: "0"
+  NVIDIA_VISIBLE_DEVICES: "all"
+  
+  # HuggingFace 설정
+  HF_HOME: "/tmp/huggingface"
+  TRANSFORMERS_CACHE: "/tmp/transformers"
+
+---
+# Secrets for sensitive data
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vllm-secrets
+  namespace: default
+  labels:
+    app: vllm-api-server
+    component: secrets
+type: Opaque
+data:
+  # Base64 encoded values
+  # echo -n "LetMeInRay" | base64
+  RAY_REDIS_PASSWORD: TGV0TWVJblJheQ==
+  # echo -n "your-secret-api-key" | base64  
+  API_KEY: eW91ci1zZWNyZXQtYXBpLWtleQ==
+
+---
+# PersistentVolumeClaim for model storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-storage-pvc
+  namespace: default
+  labels:
+    app: vllm-api-server
+    component: storage
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: local-storage  # 실제 StorageClass로 변경
+  volumeMode: Filesystem
+
+---
+# PersistentVolume for model storage (hostPath 예제)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: model-storage-pv
+  labels:
+    app: vllm-api-server
+    component: storage
+spec:
+  capacity:
+    storage: 50Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadOnlyMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-storage
+  hostPath:
+    path: /data/models  # 실제 모델이 저장된 호스트 경로
+    type: DirectoryOrCreate
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - worker-node-1  # 모델이 저장된 노드명으로 변경
+          - worker-node-2
+          - worker-node-3
+
+---
+# StorageClass for local storage
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-storage
+  labels:
+    app: vllm-api-server
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+
+---
+# ConfigMap for application configuration files
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-app-config
+  namespace: default
+  labels:
+    app: vllm-api-server
+    component: app-config
+data:
+  # Python logging configuration
+  logging.conf: |
+    [loggers]
+    keys=root,vllm_api,ray,vllm
+
+    [handlers]
+    keys=consoleHandler,fileHandler
+
+    [formatters]
+    keys=simpleFormatter,detailedFormatter
+
+    [logger_root]
+    level=INFO
+    handlers=consoleHandler
+
+    [logger_vllm_api]
+    level=INFO
+    handlers=consoleHandler,fileHandler
+    qualname=vllm_api
+    propagate=0
+
+    [logger_ray]
+    level=WARNING
+    handlers=consoleHandler
+    qualname=ray
+    propagate=0
+
+    [logger_vllm]
+    level=INFO
+    handlers=consoleHandler
+    qualname=vllm
+    propagate=0
+
+    [handler_consoleHandler]
+    class=StreamHandler
+    level=INFO
+    formatter=simpleFormatter
+    args=(sys.stdout,)
+
+    [handler_fileHandler]
+    class=handlers.RotatingFileHandler
+    level=DEBUG
+    formatter=detailedFormatter
+    args=('/app/logs/app.log', 'a', 10485760, 5, 'utf-8')
+
+    [formatter_simpleFormatter]
+    format=%(asctime)s - %(name)s - %(levelname)s - %(message)s
+
+    [formatter_detailedFormatter]
+    format=%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s
+
+  # Model configuration
+  model_config.json: |
+    {
+      "model_name": "llama-3.2-3b-instruct",
+      "model_path": "/models/llama-3.2-3b-instruct",
+      "model_type": "llama",
+      "max_model_len": 4096,
+      "tensor_parallel_size": 1,
+      "gpu_memory_utilization": 0.9,
+      "dtype": "half",
+      "trust_remote_code": true,
+      "tokenizer_mode": "auto",
+      "load_format": "auto",
+      "quantization": null,
+      "enforce_eager": false,
+      "max_context_len_to_capture": 8192,
+      "max_seq_len_to_capture": 8192,
+      "disable_custom_all_reduce": false,
+      "tokenizer_pool_size": 0,
+      "tokenizer_pool_type": "ray",
+      "tokenizer_pool_extra_config": {},
+      "enable_lora": false,
+      "max_loras": 1,
+      "max_lora_rank": 16,
+      "enable_chunked_prefill": false,
+      "max_num_batched_tokens": null,
+      "max_num_seqs": 256,
+      "max_logprobs": 20,
+      "disable_log_stats": false,
+      "revision": null,
+      "code_revision": null,
+      "rope_scaling": null,
+      "rope_theta": null,
+      "tokenizer_revision": null,
+      "max_cpu_loras": null,
+      "fully_sharded_loras": false,
+      "device": "auto",
+      "ray_workers_use_nsight": false,
+      "num_gpu_blocks_override": null,
+      "num_lookahead_slots": 0,
+      "model_loader_extra_config": {},
+      "preemption_mode": null,
+      "served_model_name": null,
+      "qlora_adapter_name_or_path": null,
+      "otlp_traces_endpoint": null
+    }
+
+  # API server configuration
+  api_config.yaml: |
+    app:
+      name: "vLLM Llama 3.2 API Server"
+      version: "1.0.0"
+      debug: false
+      
+    server:
+      host: "0.0.0.0"
+      port: 8000
+      workers: 1
+      reload: false
+      
+    api:
+      prefix: "/api/v1"
+      title: "vLLM API"
+      description: "High-performance LLM inference API"
+      version: "1.0.0"
+      
+    cors:
+      allow_origins: ["*"]
+      allow_credentials: true
+      allow_methods: ["*"]
+      allow_headers: ["*"]
+      
+    rate_limiting:
+      enabled: true
+      max_requests: 100
+      window_seconds: 60
+      
+    monitoring:
+      metrics_enabled: true
+      health_check_path: "/health"
+      metrics_path: "/metrics"
+      
+    security:
+      api_key_enabled: false
+      allowed_hosts: ["*"]
+
+  # Prometheus configuration
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    rule_files:
+      - "alert_rules.yml"
+
+    scrape_configs:
+      - job_name: 'vllm-api'
+        static_configs:
+          - targets: ['vllm-api-service:8000']
+        metrics_path: '/metrics'
+        scrape_interval: 15s
+        
+      - job_name: 'ray-cluster'
+        static_configs:
+          - targets: ['ray-head-svc:8265']
+        metrics_path: '/api/v0/metrics'
+        scrape_interval: 30s
+
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager:9093
+
+  # Alert rules
+  alert_rules.yml: |
+    groups:
+    - name: vllm_api_alerts
+      rules:
+      - alert: VLLMAPIHighErrorRate
+        expr: rate(vllm_requests_failed_total[5m]) / rate(vllm_requests_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate detected"
+          description: "vLLM API error rate is {{ $value | humanizePercentage }}"
+          
+      - alert: VLLMAPIHighResponseTime
+        expr: histogram_quantile(0.95, rate(vllm_response_time_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High response time detected"
+          description: "95th percentile response time is {{ $value }}s"
+          
+      - alert: VLLMAPIDown
+        expr: up{job="vllm-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "vLLM API is down"
+          description: "vLLM API has been down for more than 1 minute"
+          
+      - alert: RayClusterDown
+        expr: up{job="ray-cluster"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ray cluster is down"
+          description: "Ray cluster has been down for more than 2 minutes"
+          
+      - alert: GPUMemoryHigh
+        expr: vllm_gpu_memory_usage_percent > 95
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU memory usage is high"
+          description: "GPU memory usage is {{ $value }}%"
+          
+      - alert: GPUTemperatureHigh
+        expr: vllm_gpu_temperature_celsius > 85
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU temperature is high"
+          description: "GPU temperature is {{ $value }}°C"
